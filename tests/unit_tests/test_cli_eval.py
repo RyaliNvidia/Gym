@@ -29,7 +29,11 @@ import nemo_gym.cli.eval as cli_eval
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
-from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_split_datasets_declared
+from nemo_gym.cli.eval import (
+    _validate_prepared_split_file_exists,
+    _validate_split_datasets_declared,
+    _validate_task_ids_in_input,
+)
 from nemo_gym.cli.main import main
 from nemo_gym.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
@@ -295,3 +299,16 @@ class TestEvalRunNoServeWithoutHeadServer:
         assert "Start it with: `gym env start`." in captured.out
         assert "Traceback" not in captured.out + captured.err
         assert "ValueError" not in captured.out + captured.err
+
+
+class TestValidateTaskIdsInInput:
+    def test_passes_when_every_task_id_is_in_the_input(self, tmp_path) -> None:
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text('{"task_id": "a"}\n\n{"task_id": "b"}\n')
+        _validate_task_ids_in_input(input_path, ["b"])
+
+    def test_fails_on_an_unknown_task_id(self, tmp_path) -> None:
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text('{"task_id": "a"}\n')
+        with pytest.raises(ConfigError, match="No input rows for task ids"):
+            _validate_task_ids_in_input(input_path, ["b"])

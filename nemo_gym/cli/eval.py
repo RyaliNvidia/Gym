@@ -543,6 +543,11 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
     )
 
 
+def _validate_task_ids_in_input(input_jsonl_fpath: Path, task_ids: Sequence[str]) -> None:
+    rows = [json.loads(line) for line in input_jsonl_fpath.read_text().splitlines() if line.strip()]
+    select_tasks(rows, task_ids)
+
+
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
     from nemo_gym.rollout_collection import (
@@ -599,9 +604,7 @@ def e2e_rollout_collection():  # pragma: no cover
         OmegaConf.to_container(rollout_collection_config_dict)
     )
     if rollout_collection_config.task_ids is not None:
-        # Refuse unknown or missing ids before any server starts; collection selects the same rows again.
-        rows = [json.loads(line) for line in input_jsonl_fpath.read_text().splitlines() if line.strip()]
-        select_tasks(rows, rollout_collection_config.task_ids)
+        _validate_task_ids_in_input(input_jsonl_fpath, rollout_collection_config.task_ids)
 
     rh = RunHelper()
     rh.start(None)
