@@ -20,13 +20,6 @@ def row_task_id(row: Mapping[str, JsonValue]) -> str | None:
     return next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
 
 
-def _canonical(row: Mapping[str, JsonValue]) -> str:
-    """The row without Gym's per-rollout bookkeeping (``_ng_*``), which differs between repeats of one task."""
-    return json.dumps(
-        {k: v for k, v in row.items() if not k.startswith("_ng_")}, sort_keys=True, separators=(",", ":")
-    )
-
-
 def select_tasks(rows: Sequence[Mapping[str, JsonValue]], task_ids: Sequence[str]) -> list[int]:
     """Indices of the rows to run: the first row of each selected task, in input order.
 
@@ -37,25 +30,50 @@ def select_tasks(rows: Sequence[Mapping[str, JsonValue]], task_ids: Sequence[str
     with ``task_ids=["a"]`` gives one index, ``[0]``. Run with ``num_repeats=2``, that is two rollouts
     of ``a``, not eight.
     """
-    first_index: dict[str, int] = {}
-    without_id: list[int] = []
-    conflicting: set[str] = set()
-    for index, row in enumerate(rows):
-        task_id = row_task_id(row)
-        if task_id is None:
-            without_id.append(index)
-        elif task_id not in first_index:
-            first_index[task_id] = index
-        elif _canonical(row) != _canonical(rows[first_index[task_id]]):
-            conflicting.add(task_id)
-    if without_id:
+    _require_task_id_in_every_row(rows)
+    first_row_of_task = _first_row_of_each_task(rows)
+    _require_repeated_rows_to_be_identical(rows, first_row_of_task)
+    _require_task_ids_in_input(task_ids, first_row_of_task)
+    return sorted(first_row_of_task[task_id] for task_id in set(task_ids))
+
+
+def _require_task_id_in_every_row(rows: Sequence[Mapping[str, JsonValue]]) -> None:
+    rows_without_id = [index for index, row in enumerate(rows) if row_task_id(row) is None]
+    if rows_without_id:
         raise ConfigError(
-            f"{len(without_id)} of {len(rows)} input rows have no task id (none of {list(TASK_ID_FIELDS)}), "
-            f"e.g. rows {without_id[:5]}; tasks can only be selected by an id stored in the row."
+            f"{len(rows_without_id)} of {len(rows)} input rows have no task id (none of {list(TASK_ID_FIELDS)}), "
+            f"e.g. rows {rows_without_id[:5]}; tasks can only be selected by an id stored in the row."
         )
-    if conflicting:
-        raise ConfigError(f"Different rows share a task id: {sorted(conflicting)[:10]}")
-    unknown = sorted(set(task_ids) - first_index.keys())
+
+
+def _first_row_of_each_task(rows: Sequence[Mapping[str, JsonValue]]) -> dict[str, int]:
+    first_row_of_task: dict[str, int] = {}
+    for index, row in enumerate(rows):
+        first_row_of_task.setdefault(row_task_id(row), index)
+    return first_row_of_task
+
+
+def _require_repeated_rows_to_be_identical(
+    rows: Sequence[Mapping[str, JsonValue]], first_row_of_task: Mapping[str, int]
+) -> None:
+    first_row_content = {
+        task_id: _content_without_bookkeeping(rows[index]) for task_id, index in first_row_of_task.items()
+    }
+    tasks_with_differing_rows = {
+        row_task_id(row) for row in rows if _content_without_bookkeeping(row) != first_row_content[row_task_id(row)]
+    }
+    if tasks_with_differing_rows:
+        raise ConfigError(f"Different rows share a task id: {sorted(tasks_with_differing_rows)[:10]}")
+
+
+def _require_task_ids_in_input(task_ids: Sequence[str], first_row_of_task: Mapping[str, int]) -> None:
+    unknown = sorted(set(task_ids) - first_row_of_task.keys())
     if unknown:
         raise ConfigError(f"No input rows for task ids {unknown[:10]}")
-    return sorted(first_index[task_id] for task_id in set(task_ids))
+
+
+def _content_without_bookkeeping(row: Mapping[str, JsonValue]) -> str:
+    """The row as canonical JSON without Gym's per-rollout bookkeeping (``_ng_*``), which differs between repeats."""
+    return json.dumps(
+        {k: v for k, v in row.items() if not k.startswith("_ng_")}, sort_keys=True, separators=(",", ":")
+    )
