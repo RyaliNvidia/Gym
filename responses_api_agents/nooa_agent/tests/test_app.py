@@ -16,6 +16,7 @@
 import asyncio
 import json
 from http.cookies import SimpleCookie
+from json import dumps as json_dumps
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -23,14 +24,16 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import pytest
 from fastapi import Response
-from nooa import Agent, PredictStrategy, strategy
-from nooa.config import PredictConfig
+from nooa import Agent, CodeActStrategy, PredictStrategy, strategy
+from nooa.config import CodeActConfig, PredictConfig
+from nooa.errors import GenerationError
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
@@ -772,3 +775,158 @@ async def test_verifier_reply_does_not_drop_input_row_fields() -> None:
     agent, _ = make_agent()
     result = await agent.run(request(), Response(), body(agent_inputs={"customer": "alice"}))
     assert result.agent_inputs == {"customer": "alice"}
+
+
+class IterationLimitedAgent(Agent):
+    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=1, max_retries=1)))
+    async def analyze(self, text: str) -> str:
+        """Work on the task using execute_python."""
+        ...
+
+    @strategy(CodeActStrategy(config=CodeActConfig(max_retries=1)))
+    async def followup(self) -> str:
+        """Ask the model for more information."""
+        ...
+
+
+class TextOnlyLimitedAgent(Agent):
+    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=1, max_consecutive_text_only=1)))
+    async def analyze(self, text: str) -> str:
+        """Work on the task using execute_python."""
+        ...
+
+
+def make_iteration_limited_agent(
+    *, scenario: str = "iterations", max_policy_calls: int | None = None
+) -> tuple[NOOAAgent, list[dict[str, object]], list[object]]:
+    client = server_client()
+    verified: list[dict[str, object]] = []
+    model_calls: list[object] = []
+
+    async def post(*, server_name: str, url_path: str, json: object, **_: object) -> FakeHTTPResponse:
+        if server_name == "resources":
+            if url_path == "/seed_session":
+                return FakeHTTPResponse({})
+            assert url_path == "/verify"
+            assert isinstance(json, dict)
+            verified.append(json)
+            return FakeHTTPResponse(json | {"reward": 0.75})
+        assert server_name == "policy"
+        model_calls.append(json)
+        if len(model_calls) > 1:
+            raise ConnectionError("unrecovered model outage")
+        code = "print('partial progress')"
+        if scenario == "retries":
+            code = ""
+        elif scenario == "model_outage":
+            code = "try:\n    await self.followup()\nexcept Exception:\n    pass\nprint('partial progress')"
+        output = [
+            {"type": "reasoning", "id": "reasoning-1", "summary": [{"type": "summary_text", "text": "plan so far"}]},
+            NeMoGymResponseOutputMessageForTraining(
+                id="message-1",
+                prompt_token_ids=[1],
+                generation_token_ids=[2],
+                generation_log_probs=[-0.1],
+                content=[NeMoGymResponseOutputText(annotations=[], text="working on the task", logprobs=[])],
+            ),
+        ]
+        if scenario != "text_only":
+            output.append(
+                NeMoGymResponseFunctionToolCall(
+                    id="function-1", call_id="call-1", name="execute_python", arguments=json_dumps({"code": code})
+                )
+            )
+        return FakeHTTPResponse(model_response(*output))
+
+    object.__setattr__(client, "post", AsyncMock(side_effect=post))
+    agent_class = TextOnlyLimitedAgent if scenario == "text_only" else IterationLimitedAgent
+    agent = NOOAAgent(config=config(), server_client=client)
+    agent.runner = EmbeddedNOOARunner(
+        invocation=NOOAInvocationConfig(
+            agent_class=f"{__name__}:{agent_class.__name__}", invocation_adapter=f"{__name__}:invoke_text"
+        ),
+        server_client=client,
+        model_server_name="policy",
+        resources_server_name="resources",
+        max_policy_calls=max_policy_calls,
+    )
+    return agent, verified, model_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["run", "responses"])
+async def test_real_codeact_iteration_limit_preserves_evidence_and_verifier_reward(endpoint: str) -> None:
+    agent, verified, model_calls = make_iteration_limited_agent()
+    if endpoint == "run":
+        result = await agent.run(request(), Response(), body())
+        assert result.reward == 0.75
+        assert NG_FAILURE_CLASS_KEY not in result.model_extra
+        assert result.model_extra[NOOA_TERMINATION_REASON_KEY] == "max_iterations_exceeded"
+        assert len(verified) == 1
+        assert verified[0]["response"] == result.response.model_dump(mode="json")
+        assert any(gap.code == "max_iterations_exceeded" for gap in result.ng_agent_observations.gaps)
+        trajectory = result.model_extra["ng_trajectory"]
+        assert len(trajectory["turns"]) == 1
+        assert any(tool["tool_call_id"] == "call-1" for tool in trajectory["tool_calls"])
+        response = result.response
+    else:
+        response = await agent.responses(request(), Response(), body().responses_create_params)
+        assert verified == []
+    assert len(model_calls) == 1
+    assert response.status == "failed"
+    assert "max_iterations=1" in response.error.message
+    assert any(item.type == "reasoning" for item in response.output)
+    assert any(item.type == "message" and item.content[0].text == "working on the task" for item in response.output)
+    assert any(item.type == "function_call" and item.call_id == "call-1" for item in response.output)
+    assert any(
+        item.type == "function_call_output" and item.call_id == "call-1" and "partial progress" in item.output
+        for item in response.output
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["retries", "text_only", "model_outage"])
+async def test_other_failures_at_iteration_limit_do_not_reach_verifier(scenario: str) -> None:
+    agent, verified, model_calls = make_iteration_limited_agent(scenario=scenario)
+
+    result = await agent.run(request(), Response(), body())
+
+    assert verified == []
+    assert result.reward == 0.0
+    assert NG_FAILURE_CLASS_KEY in result.model_extra
+    assert NOOA_TERMINATION_REASON_KEY not in result.model_extra
+    assert len(model_calls) == (2 if scenario == "model_outage" else 1)
+    assert result.response.output
+
+
+@pytest.mark.asyncio
+async def test_matching_generation_error_text_is_not_iteration_exhaustion() -> None:
+    agent, verified, _ = make_iteration_limited_agent()
+
+    async def invoke_error(agent: object, request: object) -> object:
+        raise GenerationError("Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.")
+
+    agent.runner._invocation_adapter = invoke_error
+    result = await agent.run(request(), Response(), body())
+
+    assert verified == []
+    assert NG_FAILURE_CLASS_KEY in result.model_extra
+    assert NOOA_TERMINATION_REASON_KEY not in result.model_extra
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_iteration_exhaustion_is_not_graded() -> None:
+    agent, verified, _ = make_iteration_limited_agent()
+
+    async def cancel_after_limit(agent: Any, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
+        try:
+            await invoke_text(agent, request)
+        except GenerationError:
+            raise asyncio.CancelledError
+
+    agent.runner._invocation_adapter = cancel_after_limit
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await agent.run(request(), Response(), body())
+    assert verified == []
+    assert caught.value.nooa_result.termination_reason is None
+    assert caught.value.nooa_result.episode.response.output

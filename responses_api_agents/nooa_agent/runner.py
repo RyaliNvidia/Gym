@@ -22,7 +22,9 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import uuid4
 
+from nooa.errors import GenerationError
 from nooa.runtime.hooks import hooks_scope
+from nooa.strategies.codeact import CodeActSession, CodeActStrategy
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, TrajectoryRecord
@@ -91,6 +93,27 @@ def _validate_agent_llm_bindings(agent_class: type) -> None:
         )
 
 
+def _is_codeact_iteration_exhaustion(error: BaseException) -> bool:
+    # The pinned NOOA raises a generic GenerationError for both iteration and
+    # retry exhaustion. Require its actual CodeAct origin and session state;
+    # matching the message alone would also accept unrelated generation errors.
+    if type(error) is not GenerationError or error.__traceback__ is None:
+        return False
+    traceback = error.__traceback__
+    while traceback.tb_next is not None:
+        traceback = traceback.tb_next
+    if traceback.tb_frame.f_code is not CodeActStrategy._run_generation.__code__:
+        return False
+    session = traceback.tb_frame.f_locals.get("session")
+    return (
+        isinstance(session, CodeActSession)
+        and session.max_iterations is not None
+        and session.iteration >= session.max_iterations
+        and session.error_count < session.max_retries
+        and str(error) == str(session.build_failure_error())
+    )
+
+
 class EmbeddedNOOARunner:
     """Construct and invoke one isolated NOOA agent instance per Gym rollout."""
 
@@ -101,7 +124,7 @@ class EmbeddedNOOARunner:
         server_client: ServerClient,
         model_server_name: str,
         resources_server_name: str,
-        max_policy_calls: int,
+        max_policy_calls: int | None,
     ) -> None:
         if invocation.execution_mode == "sandboxed":
             raise NotImplementedError("NOOA sandboxed execution is not implemented")
@@ -154,7 +177,7 @@ class EmbeddedNOOARunner:
             # NOOA may wrap a model error after its strategy retry loop.
             cause: BaseException | None = error
             seen: set[int] = set()
-            while cause is not None and id(cause) not in seen:
+            while isinstance(error, Exception) and cause is not None and id(cause) not in seen:
                 seen.add(id(cause))
                 if isinstance(cause, (PolicyCallBudgetExceeded, InvalidPolicyOutputError)):
                     termination_reason = (
@@ -164,7 +187,18 @@ class EmbeddedNOOARunner:
                     )
                     termination_error = str(cause)
                     break
+                if _is_codeact_iteration_exhaustion(cause):
+                    termination_reason = "max_iterations_exceeded"
+                    termination_error = str(cause)
+                    break
                 cause = cause.__cause__ or cause.__context__
+
+        # An unrecovered model transport failure cannot become a graded fallback.
+        if state.fatal_error is not None:
+            termination_reason = None
+            termination_error = None
+            if failure is None:
+                failure = state.fatal_error
 
         episode, trajectory = trace.project(
             create_params=request.responses_create_params,
