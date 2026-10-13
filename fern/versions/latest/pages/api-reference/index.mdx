@@ -18,3 +18,15 @@ This reference is built from docstrings in the [source code](https://github.com/
 | `nemo_gym.server_utils` | Server utilities, HTTP client, and middleware |
 | `nemo_gym.openai_utils` | OpenAI API client wrapper |
 | `nemo_gym.sandbox` | Provider-neutral sandbox API for isolated command execution and file transfer |
+| `nemo_gym.rollout_collection` | In-process rollout API: `RolloutCollectionHelper.preprocess_examples` and `RolloutCollectionHelper.run_examples` |
+
+## In-process rollout API
+
+To run rollouts from Python against Gym servers that are already running, call
+`RolloutCollectionHelper.preprocess_examples` to select, route and repeat rows, then pass the returned rows to
+`RolloutCollectionHelper.run_examples`, which sends each row to its agent and returns awaitables that resolve to
+`(row, result)` pairs.
+`gym eval run` uses the same steps.
+
+These two methods are a supported API. Their signatures change only additively: a new parameter is optional
+and keyword-only, and a parameter is deprecated before it is removed or renamed.

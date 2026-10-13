@@ -18,9 +18,11 @@ Environments are expected to import base classes and core types from ``nemo_gym`
 These tests pin that contract.
 Every advertised name resolves to the same object as its defining module.
 Importing ``nemo_gym`` does not eagerly import the server stack.
+The in-process rollout API keeps its signatures.
 """
 
 import importlib
+import inspect
 import subprocess
 import sys
 
@@ -70,6 +72,47 @@ EXPECTED_EAGER_EXPORTS = {
     "__package_name__",
     "__version__",
 }
+
+_POSITIONAL = inspect.Parameter.POSITIONAL_OR_KEYWORD
+_KEYWORD = inspect.Parameter.KEYWORD_ONLY
+_REQUIRED = inspect.Parameter.empty
+
+# RolloutCollectionHelper methods that callers use to run rollouts from Python against running servers.
+# Changes must be additive: a new parameter is optional and keyword-only. Removing or renaming a parameter,
+# or changing its default, needs a deprecation first; update this list in the same change.
+EXPECTED_IN_PROCESS_ROLLOUT_SIGNATURES = {
+    "preprocess_examples": [
+        ("self", _POSITIONAL, _REQUIRED),
+        ("examples", _POSITIONAL, _REQUIRED),
+        ("agent_map", _KEYWORD, None),
+        ("fan_out", _KEYWORD, None),
+        ("num_repeats", _KEYWORD, 1),
+        ("num_repeats_add_seed", _KEYWORD, False),
+        ("global_config_dict", _KEYWORD, None),
+        ("task_ids", _KEYWORD, None),
+    ],
+    "run_examples": [
+        ("self", _POSITIONAL, _REQUIRED),
+        ("examples", _POSITIONAL, _REQUIRED),
+        ("head_server_config", _POSITIONAL, None),
+        ("semaphore", _POSITIONAL, None),
+        ("route_failures_to_sidecar", _POSITIONAL, False),
+        ("environment_server_name", _POSITIONAL, None),
+        ("max_resident_tasks", _KEYWORD, None),
+        ("dispatch_budget_s", _KEYWORD, None),
+        ("drain_margin_s", _KEYWORD, None),
+        ("latency_tracker", _KEYWORD, None),
+    ],
+}
+
+
+@pytest.mark.parametrize("method_name", sorted(EXPECTED_IN_PROCESS_ROLLOUT_SIGNATURES))
+def test_in_process_rollout_api_keeps_its_signature(method_name: str):
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    parameters = inspect.signature(getattr(RolloutCollectionHelper, method_name)).parameters.values()
+    actual = [(parameter.name, parameter.kind, parameter.default) for parameter in parameters]
+    assert actual == EXPECTED_IN_PROCESS_ROLLOUT_SIGNATURES[method_name]
 
 
 def test_public_api_contract_is_explicit():

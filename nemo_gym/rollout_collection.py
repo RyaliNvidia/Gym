@@ -2192,6 +2192,8 @@ class RolloutCollectionHelper(BaseModel):
         drive dispatch themselves): ``run_examples`` resolves task_sources and validates agent
         names, but ``agent_map``, ``fan_out`` and ``num_repeats`` are applied only during
         preprocessing. Call this first, then pass the returned rows to ``run_examples``.
+        Together with ``run_examples`` this is Gym's supported in-process rollout API: its
+        signature changes only additively, and a parameter is deprecated before it is removed.
 
         Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
         their agents here; leave it None to defer that to ``run_examples``, which does it against
@@ -3831,6 +3833,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
+        Together with ``preprocess_examples`` this is Gym's supported in-process rollout API: its
+        signature changes only additively, and a parameter is deprecated before it is removed.
 
         Rows are dispatched as given: task_sources are resolved and agent names validated here,
         but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call

@@ -32,6 +32,10 @@ def select_tasks(rows: Sequence[Mapping[str, JsonValue]], task_ids: Sequence[str
 
     Each task is returned once even when the input repeats its row, so the caller's repeat count alone
     decides the number of samples. Rows are selected only by an id stored in the row, never by position.
+
+    For example, a collated input that already repeats each task four times (``a, a, a, a, b, b, b, b``)
+    with ``task_ids=["a"]`` gives one index, ``[0]``. Run with ``num_repeats=2``, that is two rollouts
+    of ``a``, not eight.
     """
     first_index: dict[str, int] = {}
     without_id: list[int] = []
