@@ -87,9 +87,10 @@ Rollout rewards
 Recorded with the outcome counter for every ``scored`` attempt that carries a numeric reward; a
 result without one is unscored, not a zero. Rewards are environment-defined floats: binary, partial
 credit, or negative penalties, so they are not a histogram (which rejects negative values).
-``gym.rollout.rewarded_total`` (counter): one per such attempt, by ``nemo.gym.rollout.reward.range``
-(``negative``, ``zero``, ``partial`` for strictly between 0 and 1, ``full`` for exactly 1, or
-``above_one``). ``gym.rollout.summed_reward`` (up-down counter): the sum of those rewards, so the
+``gym.rollout.rewarded_total`` (counter): one per such attempt, by ``nemo.gym.rollout.reward.bucket``:
+``<0``, ``0``, ``0-0.25``, ``0.25-0.5``, ``0.5-0.75``, ``0.75-1``, ``1`` or ``>1``. A bucket includes
+its upper bound, except ``0.75-1``, which stops below 1, so ``0`` and ``1`` hold exactly 0 and 1.
+``gym.rollout.summed_reward`` (up-down counter): the sum of those rewards, so the
 mean reward is ``summed_reward / rewarded_total``. Both carry ``nemo.gym.rollout.dispatch.name`` and
 ``nemo.gym.rollout.masked`` (the result's ``mask_sample``), so masked rewards can be left out as the
 aggregate metrics leave them out. A live view of the run, not its score: benchmark metrics such as
@@ -137,7 +138,7 @@ FAILURE_TYPE_ATTRIBUTE = "nemo.gym.failure_type"
 DISPATCH_NAME_ATTRIBUTE = "nemo.gym.rollout.dispatch.name"
 ROLLOUT_REWARDED_INSTRUMENT = "gym.rollout.rewarded_total"
 ROLLOUT_SUMMED_REWARD_INSTRUMENT = "gym.rollout.summed_reward"
-REWARD_RANGE_ATTRIBUTE = "nemo.gym.rollout.reward.range"
+REWARD_BUCKET_ATTRIBUTE = "nemo.gym.rollout.reward.bucket"
 ROLLOUT_MASKED_ATTRIBUTE = "nemo.gym.rollout.masked"
 UNREGISTERED_FAILURE_KIND = "unregistered"
 
@@ -422,25 +423,30 @@ def record_rollout_completed(
     )
 
 
-def _reward_range(reward: float) -> str:
+#: Upper bound and label of each reward bucket below 1, in order; see ``_reward_bucket``.
+REWARD_BUCKETS: tuple[tuple[float, str], ...] = ((0.25, "0-0.25"), (0.5, "0.25-0.5"), (0.75, "0.5-0.75"))
+
+
+def _reward_bucket(reward: float) -> str:
+    """Exactly 0 and exactly 1 get their own bucket; partial credit is split in quarters."""
     if reward < 0:
-        return "negative"
+        return "<0"
     if reward == 0:
-        return "zero"
-    if reward < 1:
-        return "partial"
+        return "0"
+    if reward > 1:
+        return ">1"
     if reward == 1:
-        return "full"
-    return "above_one"
+        return "1"
+    return next((label for upper, label in REWARD_BUCKETS if reward <= upper), "0.75-1")
 
 
 def record_rollout_reward(reward: float, *, dispatch_name: str, masked: bool) -> None:
-    """Count one scored attempt by reward range and add its reward to the run's reward sum."""
+    """Count one scored attempt in its reward bucket and add its reward to the run's reward sum."""
     attributes: dict[str, Any] = {DISPATCH_NAME_ATTRIBUTE: dispatch_name, ROLLOUT_MASKED_ATTRIBUTE: masked}
     _record_counter(
         ROLLOUT_REWARDED_INSTRUMENT,
-        "Scored rollout attempts that carry a reward, by reward range.",
-        attributes | {REWARD_RANGE_ATTRIBUTE: _reward_range(reward)},
+        "Scored rollout attempts that carry a reward, by reward bucket.",
+        attributes | {REWARD_BUCKET_ATTRIBUTE: _reward_bucket(reward)},
         unit="{rollout}",
     )
     _record_up_down_counter(

@@ -30,7 +30,7 @@ samples) shows up while it is still running. See
 | `gym.http.connection_pool.queue_duration_ms` | Histogram | ms | Time one queued connection acquisition waited for an aiohttp pool slot. |
 | `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection attempts (`connect()` calls), including attempts that later fail or are abandoned. |
 | `gym.rollout.completed_total` | Counter | count | Rollout attempts the collection driver finished handling, by outcome. See below. |
-| `gym.rollout.rewarded_total` | Counter | count | Scored rollout attempts that carry a reward, by reward range. See below. |
+| `gym.rollout.rewarded_total` | Counter | count | Scored rollout attempts that carry a reward, by reward bucket. See below. |
 | `gym.rollout.summed_reward` | UpDownCounter | reward | Sum of the rewards of those attempts. See below. |
 | `gym.server.memory.usage` | Gauge | bytes | Current RSS or PSS for one managed server and its descendants. |
 | `gym.server.memory.sampled_peak` | Gauge | bytes | Largest value observed by the sampler for one managed server and its descendants. |
@@ -73,8 +73,9 @@ as `gym.rollout.completed_total`. A result without a numeric reward is unscored,
 not recorded. Failed and omitted attempts have no reward.
 
 Rewards are whatever the environment's verifier returns: binary, partial credit, or a negative
-penalty. `nemo.gym.rollout.reward.range` sorts each one into `negative`, `zero`, `partial`
-(strictly between 0 and 1), `full` (exactly 1) or `above_one`. The mean reward is
+penalty. `nemo.gym.rollout.reward.bucket` sorts each one into `<0`, `0`, `0-0.25`, `0.25-0.5`,
+`0.5-0.75`, `0.75-1`, `1` or `>1`. A bucket includes its upper bound, except `0.75-1`, which stops
+below 1, so `0` and `1` hold exactly 0 and exactly 1. The mean reward is
 `summed_reward / rewarded_total`. A histogram cannot carry this, because OpenTelemetry histograms
 reject negative values.
 
