@@ -25,6 +25,8 @@ def select_tasks(rows: Sequence[Mapping[str, JsonValue]], task_ids: Sequence[str
 
     Each task is returned once even when the input repeats its row, so the caller's repeat count alone
     decides the number of samples. Rows are selected only by an id stored in the row, never by position.
+    Every row must carry an id; only the selected tasks' rows must agree with each other, so a caller that
+    selects one task per call does not re-check the whole input each time.
 
     For example, a collated input that already repeats each task four times (``a, a, a, a, b, b, b, b``)
     with ``task_ids=["a"]`` gives one index, ``[0]``. Run with ``num_repeats=2``, that is two rollouts
@@ -32,8 +34,8 @@ def select_tasks(rows: Sequence[Mapping[str, JsonValue]], task_ids: Sequence[str
     """
     _require_task_id_in_every_row(rows)
     first_row_of_task = _first_row_of_each_task(rows)
-    _require_repeated_rows_to_be_identical(rows, first_row_of_task)
     _require_task_ids_in_input(task_ids, first_row_of_task)
+    _require_repeated_rows_to_be_identical(rows, first_row_of_task, set(task_ids))
     return sorted(first_row_of_task[task_id] for task_id in set(task_ids))
 
 
@@ -54,13 +56,16 @@ def _first_row_of_each_task(rows: Sequence[Mapping[str, JsonValue]]) -> dict[str
 
 
 def _require_repeated_rows_to_be_identical(
-    rows: Sequence[Mapping[str, JsonValue]], first_row_of_task: Mapping[str, int]
+    rows: Sequence[Mapping[str, JsonValue]], first_row_of_task: Mapping[str, int], task_ids: set[str]
 ) -> None:
     first_row_content = {
-        task_id: _content_without_bookkeeping(rows[index]) for task_id, index in first_row_of_task.items()
+        task_id: _content_without_bookkeeping(rows[first_row_of_task[task_id]]) for task_id in task_ids
     }
+    rows_of_selected_tasks = [(row_task_id(row), row) for row in rows if row_task_id(row) in task_ids]
     tasks_with_differing_rows = {
-        row_task_id(row) for row in rows if _content_without_bookkeeping(row) != first_row_content[row_task_id(row)]
+        task_id
+        for task_id, row in rows_of_selected_tasks
+        if _content_without_bookkeeping(row) != first_row_content[task_id]
     }
     if tasks_with_differing_rows:
         raise ConfigError(f"Different rows share a task id: {sorted(tasks_with_differing_rows)[:10]}")

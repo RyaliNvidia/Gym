@@ -54,3 +54,8 @@ class TestSelectTasks:
     def test_refuses_different_rows_with_the_same_id(self) -> None:
         with pytest.raises(ConfigError, match="share a task id"):
             select_tasks([_row("a", prompt="x"), _row("a", prompt="y")], ["a"])
+
+    def test_differing_rows_of_an_unselected_task_do_not_block_selection(self) -> None:
+        rows = [_row("a", prompt="x"), _row("a", prompt="y"), _row("b")]
+
+        assert select_tasks(rows, ["b"]) == [2]

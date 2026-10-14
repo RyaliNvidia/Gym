@@ -2210,12 +2210,11 @@ class RolloutCollectionHelper(BaseModel):
             num_repeats_add_seed=num_repeats_add_seed,
             task_ids=task_ids,
         )
+        selected = range(len(examples)) if config.task_ids is None else select_tasks(examples, config.task_ids)
         raw_rows = [
-            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), row.copy())
-            for idx, row in enumerate(examples)
+            (idx, orjson.dumps(examples[idx], option=orjson.OPT_SORT_KEYS).decode(), examples[idx].copy())
+            for idx in selected
         ]
-        if config.task_ids is not None:
-            raw_rows = _select_task_rows(raw_rows, config.task_ids)
         rows = self._preprocess_raw_rows(raw_rows, config)
         if global_config_dict is not None:
             self.resolve_task_sources(rows, global_config_dict)
