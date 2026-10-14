@@ -1732,8 +1732,7 @@ _MAX_FAILURE_BODY_CHARS = 2000
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
     """One ``gym.rollout.completed_total`` increment, after the driver wrote or omitted the attempt.
 
-    A scored attempt with a numeric reward also records it in ``gym.rollout.rewarded_total`` and
-    ``gym.rollout.summed_reward``.
+    A scored attempt with a numeric reward is also counted in ``gym.rollout.rewarded_total``.
     """
     if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
         return
