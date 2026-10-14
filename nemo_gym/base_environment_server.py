@@ -83,12 +83,13 @@ class CleanupContext:
 
     Callbacks:
     - are process-local Python objects, although they may issue remote close requests;
-    - run sequentially in LIFO order within one total cleanup timeout;
+    - run sequentially in LIFO order, each within its own cleanup timeout;
     - must be idempotent because a timed-out remote request may have succeeded;
     - are lost on process or host failure, so remote owners need expiry or reaping.
 
-    Callback failures are logged and do not stop later callbacks. Cleanup has no
-    durable retry after this context is discarded.
+    Callback failures and timeouts are logged and do not stop later callbacks: a
+    hung agent-session close must not starve the sandbox stop registered before it.
+    Cleanup has no durable retry after this context is discarded.
     """
 
     episode_id: EpisodeId
@@ -101,18 +102,16 @@ class CleanupContext:
         return CleanupHandle(entry, self.cleanup_timeout_seconds)
 
     async def aclose(self) -> None:
-        async def unwind() -> None:
-            for entry in reversed(self._cleanups):
-                try:
+        for entry in reversed(self._cleanups):
+            try:
+                # Each callback gets the whole budget: one that hangs is abandoned (its owner's expiry or
+                # reaping takes over) and the earlier-registered callbacks still run.
+                async with asyncio.timeout(self.cleanup_timeout_seconds):
                     await entry.close()
-                except Exception:
-                    LOGGER.exception(f"Episode cleanup failed: {entry.name}")
-
-        try:
-            async with asyncio.timeout(self.cleanup_timeout_seconds):
-                await unwind()
-        except TimeoutError:
-            LOGGER.error(f"Episode cleanup timed out: episode_id={self.episode_id}")
+            except TimeoutError:
+                LOGGER.error(f"Episode cleanup timed out: {entry.name} episode_id={self.episode_id}")
+            except Exception:
+                LOGGER.exception(f"Episode cleanup failed: {entry.name}")
 
 
 class HandledEpisodeError(Exception):
