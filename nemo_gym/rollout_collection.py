@@ -18,6 +18,7 @@ import functools
 import glob as glob_module
 import json
 import logging
+import math
 import os
 import tempfile
 import time
@@ -104,6 +105,7 @@ from nemo_gym.telemetry.gym_metrics import (
     UNREGISTERED_FAILURE_KIND,
     record_rollout_completed,
     record_rollout_health,
+    record_rollout_reward,
 )
 from nemo_gym.telemetry.setup import is_metrics_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -1728,7 +1730,11 @@ _MAX_FAILURE_BODY_CHARS = 2000
 
 
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
-    """One ``gym.rollout.completed_total`` increment, after the driver wrote or omitted the attempt."""
+    """One ``gym.rollout.completed_total`` increment, after the driver wrote or omitted the attempt.
+
+    A scored attempt with a numeric reward also records it in ``gym.rollout.rewarded_total`` and
+    ``gym.rollout.summed_reward``.
+    """
     if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
         return
     failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -1742,6 +1748,15 @@ def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name:
         failure_kind=_metric_failure_kind(failure_kind),
         failure_type=failure_type if isinstance(failure_type, str) else None,
     )
+    reward = result.get("reward")
+    # A result without a numeric reward is unscored, not a zero.
+    if (
+        outcome == "scored"
+        and isinstance(reward, (int, float))
+        and not isinstance(reward, bool)
+        and math.isfinite(reward)
+    ):
+        record_rollout_reward(float(reward), dispatch_name=dispatch_name, masked=bool(result.get(MASK_SAMPLE_KEY)))
 
 
 def _metric_failure_kind(failure_kind: Any) -> Optional[str]:

@@ -82,6 +82,19 @@ when rows name no environment server) and, on attempts that carry a failure clas
 namespaced, any other value recorded as ``unregistered``) and ``nemo.gym.failure_type`` (exception
 class name). Free-text reasons are never attributes.
 
+Rollout rewards
+---------------
+Recorded with the outcome counter for every ``scored`` attempt that carries a numeric reward; a
+result without one is unscored, not a zero. Rewards are environment-defined floats: binary, partial
+credit, or negative penalties, so they are not a histogram (which rejects negative values).
+``gym.rollout.rewarded_total`` (counter): one per such attempt, by ``nemo.gym.rollout.reward.range``
+(``negative``, ``zero``, ``partial`` for strictly between 0 and 1, ``full`` for exactly 1, or
+``above_one``). ``gym.rollout.summed_reward`` (up-down counter): the sum of those rewards, so the
+mean reward is ``summed_reward / rewarded_total``. Both carry ``nemo.gym.rollout.dispatch.name`` and
+``nemo.gym.rollout.masked`` (the result's ``mask_sample``), so masked rewards can be left out as the
+aggregate metrics leave them out. A live view of the run, not its score: benchmark metrics such as
+pass@k come from ``/aggregate_metrics``.
+
 Rollout health
 --------------
 The trajectory-level checks of the rollout health report, evaluated as each rollout finishes.
@@ -122,6 +135,10 @@ FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
 FAILURE_KIND_ATTRIBUTE = "nemo.gym.failure_kind"
 FAILURE_TYPE_ATTRIBUTE = "nemo.gym.failure_type"
 DISPATCH_NAME_ATTRIBUTE = "nemo.gym.rollout.dispatch.name"
+ROLLOUT_REWARDED_INSTRUMENT = "gym.rollout.rewarded_total"
+ROLLOUT_SUMMED_REWARD_INSTRUMENT = "gym.rollout.summed_reward"
+REWARD_RANGE_ATTRIBUTE = "nemo.gym.rollout.reward.range"
+ROLLOUT_MASKED_ATTRIBUTE = "nemo.gym.rollout.masked"
 UNREGISTERED_FAILURE_KIND = "unregistered"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
@@ -231,18 +248,24 @@ def _record_histogram(
         logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
 
 
-def _record_counter(name: str, description: str, attributes: dict[str, Any], amount: int = 1) -> None:
+def _record_counter(
+    name: str, description: str, attributes: dict[str, Any], amount: int = 1, *, unit: str = "1"
+) -> None:
     meter = _meter()
     if meter is None:
         return
     try:
-        instrument = _get_or_create(meter, name, lambda: meter.create_counter(name, unit="1", description=description))
+        instrument = _get_or_create(
+            meter, name, lambda: meter.create_counter(name, unit=unit, description=description)
+        )
         instrument.add(amount, attributes=attributes)
     except Exception:
         logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
 
 
-def _record_up_down_counter(name: str, unit: str, description: str, delta: int, attributes: dict[str, Any]) -> None:
+def _record_up_down_counter(
+    name: str, unit: str, description: str, delta: int | float, attributes: dict[str, Any]
+) -> None:
     meter = _meter()
     if meter is None:
         return
@@ -396,6 +419,36 @@ def record_rollout_completed(
         attributes[FAILURE_TYPE_ATTRIBUTE] = failure_type
     _record_counter(
         ROLLOUT_COMPLETED_INSTRUMENT, "Rollout attempts the driver finished handling, by outcome.", attributes
+    )
+
+
+def _reward_range(reward: float) -> str:
+    if reward < 0:
+        return "negative"
+    if reward == 0:
+        return "zero"
+    if reward < 1:
+        return "partial"
+    if reward == 1:
+        return "full"
+    return "above_one"
+
+
+def record_rollout_reward(reward: float, *, dispatch_name: str, masked: bool) -> None:
+    """Count one scored attempt by reward range and add its reward to the run's reward sum."""
+    attributes: dict[str, Any] = {DISPATCH_NAME_ATTRIBUTE: dispatch_name, ROLLOUT_MASKED_ATTRIBUTE: masked}
+    _record_counter(
+        ROLLOUT_REWARDED_INSTRUMENT,
+        "Scored rollout attempts that carry a reward, by reward range.",
+        attributes | {REWARD_RANGE_ATTRIBUTE: _reward_range(reward)},
+        unit="{rollout}",
+    )
+    _record_up_down_counter(
+        ROLLOUT_SUMMED_REWARD_INSTRUMENT,
+        "{reward}",
+        "Sum of the rewards of scored rollout attempts; divide by gym.rollout.rewarded_total for the mean.",
+        reward,
+        attributes,
     )
 
 
